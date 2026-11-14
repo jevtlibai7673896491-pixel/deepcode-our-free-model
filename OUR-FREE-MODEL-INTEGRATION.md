@@ -42,3 +42,15 @@
 
 - 类 A+B 实际载荷：约 5.5M（index 134K + client 616K + src 约 2M + pack.js 2.8M + wasm 292K + 其余 <200K）
 - 排除：engine-parts 28M + magpie exe 70M = 98M 未塞
+
+## 附录：pack.js 不入库（安全）
+
+- 来源：`Ebony-Vinyl/dsh-our-free-model` 提交 `edfdaf2cb64bb39c7c682b90c96ef9e3fef3be15`（v2.8.3 之后 HEAD）。
+- 原因：`vendor/channel-pack/pack.js` 第 63124 行含第三方 `GEMINI_DEFAULT_CLIENT_SECRET` 常量，GitHub push protection 判定为 secret 并拒绝推送。
+- 处理：不入库（`.gitignore` 已列），构建链（`.github/workflows/build-apk.yml` 第 2 步）从上游该固定提交 raw 取回并校验
+  `sha256=df0047685e14d1e4f75aa16f07e6f26258d991c923ff40f199dbb453c0096fd6`。
+- 影响：`index.js:1131` 对该文件是 `void import(...).catch(...)` 动态加载，缺失时仅 `channelPack.state='failed'`，
+  `llm` 适配器与模型列表不受影响；构建时补齐后行为与上游一致。
+
+- 同类不入库文件（第 2 个）：`src/subscriptions.js`（第 34 行 `GOCSPX-…` 常量），
+  sha256=`ec1e01728f03bfd446f77dedf5615f50405b1c0679bf646c3a75cdf8bd0a86e2`，同样由第 2 步取回校验。

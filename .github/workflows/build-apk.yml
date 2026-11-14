@@ -1,0 +1,80 @@
+name: build-apk
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 1) 安装 JDK/SDK
+        run: |
+          set -e
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          node -v
+          yes | sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          sudo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null
+          echo "sdk.dir=${ANDROID_HOME}" > android-shell/local.properties
+          ls "${ANDROID_HOME}/platforms" "${ANDROID_HOME}/build-tools"
+
+      - name: 2) assemble（下载快照 + 注入 dsh-our-free-model）
+        run: |
+          set -e
+          mkdir -p downloads
+
+          # 两个文件不入库：内含上游硬编码的第三方 Google OAuth client 常量，GitHub push protection
+          # 判为 secret 并拒绝推送（见 OUR-FREE-MODEL-INTEGRATION.md 附录）。构建时从上游固定提交
+          # edfdaf2cb64bb39c7c682b90c96ef9e3fef3be15 取回并按 sha256 校验，产物与上游一致。
+          upstream=https://raw.githubusercontent.com/Ebony-Vinyl/dsh-our-free-model/edfdaf2cb64bb39c7c682b90c96ef9e3fef3be15
+          while read -r want rel; do
+            [ -n "$want" ] || continue
+            curl -sSL -o "android-shell/plugins/dsh-our-free-model/$rel" "$upstream/$rel"
+            echo "$want  android-shell/plugins/dsh-our-free-model/$rel" | sha256sum -c -
+          done <<'LIST'
+          df0047685e14d1e4f75aa16f07e6f26258d991c923ff40f199dbb453c0096fd6 vendor/channel-pack/pack.js
+          ec1e01728f03bfd446f77dedf5615f50405b1c0679bf646c3a75cdf8bd0a86e2 src/subscriptions.js
+          LIST
+          ls -l android-shell/plugins/dsh-our-free-model/vendor/channel-pack/pack.js android-shell/plugins/dsh-our-free-model/src/subscriptions.js
+          curl -sSL -o downloads/snapshot-arm64.tar.xz \
+            https://github.com/kelai141/dsh-mobile-apk/releases/download/v0.14.0-preview/snapshot-arm64.tar.xz
+          ls -l downloads/snapshot-arm64.tar.xz
+          echo "ed24dfcc004725dee4c41e6b9d139fa10e97455af270187794f838327caec28f  downloads/snapshot-arm64.tar.xz" | sha256sum -c -
+          mkdir -p android-shell/app/src/main/assets
+          python3 scripts/inject-our-free-model.py \
+            downloads/snapshot-arm64.tar.xz \
+            android-shell/app/src/main/assets/snapshot.tar.xz \
+            android-shell/plugins/dsh-our-free-model
+          sha256sum android-shell/app/src/main/assets/snapshot.tar.xz | cut -d' ' -f1 \
+            > android-shell/app/src/main/assets/snapshot.sha256
+          echo "snapshot:"
+          ls -l android-shell/app/src/main/assets/snapshot.tar.xz
+          echo "plugin entries in snapshot: $(tar -tJf android-shell/app/src/main/assets/snapshot.tar.xz | grep -c 'dsh-our-free-model')"
+          tar -tJf android-shell/app/src/main/assets/snapshot.tar.xz | grep -c 'dsh-our-free-model' | grep -qv '^0$'
+
+      - name: 3) assembleDebug
+        run: |
+          set -e
+          # 调试签名：仓库不带签名密钥，AGP 会在用户级 ANDROID_USER_HOME 下自建 debug.keystore。
+          # runner 上 /home/runner/.config 可能由 sudo 步骤建为不可写，显式改到 runner 临时目录。
+          export ANDROID_USER_HOME="${RUNNER_TEMP}/android-home"
+          mkdir -p "$ANDROID_USER_HOME" "$HOME/.android"
+          chmod -R u+w "$HOME/.config" 2>/dev/null || true
+          cd android-shell
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug -PruntimeAbi=arm64-v8a --no-daemon --console=plain
+          ls -l app/build/outputs/apk/debug/
+          APK=$(ls app/build/outputs/apk/debug/*.apk | head -n1)
+          "${ANDROID_HOME}/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 3
+
+      - name: 4) 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepcode-our-free-model-apk
+          path: android-shell/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30

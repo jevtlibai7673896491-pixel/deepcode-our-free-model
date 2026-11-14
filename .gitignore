@@ -97,3 +97,8 @@
 **/[A-Za-z]:/
 **/.npm-cache/
 **/_cacache/
+# dsh-our-free-model：vendor/channel-pack/pack.js 是上游 2.8.3 的预构建 bundle，内含第三方
+# Google OAuth client 常量（GitHub push protection 判为 secret），不入库；构建时从上游
+# 固定提交 edfdaf2cb64bb39c7c682b90c96ef9e3fef3be15 取回并按 sha256 校验。
+/android-shell/plugins/dsh-our-free-model/vendor/channel-pack/pack.js
+/android-shell/plugins/dsh-our-free-model/src/subscriptions.js
