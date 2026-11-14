@@ -93,7 +93,9 @@ Codex 后端任务仍由其持久线程保存；语音片段回填不等于导�
 
 ## 可配置 ASR/TTS 与直接语音
 
-`dsh-speech-services` 接管普通语音的默认服务与设置入口。桌面模式通过同一 BackgroundVoiceService 的 direct 标志，手动结束后把转录原文排队交给固定会话，不经过 GPT Live；普通输入仍进入草稿。SpeechSessionFocus 跟随当前聊天或工作台激活泳道；SpeechOverlay 提供桌面半透明短回复层、可选朗读和仅焦点面板的手柄输入。工具条只保留编辑、语音、收起，文字输入按需展开，配置留在插件设置。详见 [语音服务](../../../docs/development/SPEECH-SERVICES.md)；源码接入不代表 APK/实机已验收。
+`dsh-speech-services` 接管普通语音的默认服务与设置入口。桌面模式通过同一 BackgroundVoiceService 的 direct 标志，手动结束后把转录原文排队交给固定会话，不经过 GPT Live；普通输入仍进入草稿。SpeechSessionFocus 跟随当前聊天或工作台激活泳道；SpeechOverlay 提供桌面半透明短回复层、可选朗读和仅焦点面板的手柄输入。工具条只保留编辑、语音、收起，文字输入按需展开，配置留在插件设置。
+
+目标会话解析（2026-11-14 起）：JS 投影 `bridge.speechSession()` 只是**快取**，权威真源是引擎 `session/list`。投影缺失（插件未装/未开、文档不可见、服务端快照重连）时，`OverlayService.ensureSession()` 用引擎兜底解析并写入 `activeSessionId`，因此发送、停止、录音、看实时四条路径都不会再误报「先在 DeepCode 打开一个会话」；只有引擎明确回答**没有会话**时才提示新建。会话行显示当前目标会话（点按切换下一个），右侧「看 AI 实时」（`captions` 图标）开关回复正文的流式字幕，与语音输入、GPT Live 相互独立。详见 [语音服务](../../../docs/development/SPEECH-SERVICES.md)；源码接入不代表 APK/实机已验收。
 
 
 ## 普通 Codex 回合的 commentary

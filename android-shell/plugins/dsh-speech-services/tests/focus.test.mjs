@@ -38,3 +38,29 @@ test('native reply click opens the exact session in full chat without changing d
  request='deleted';assert.equal(openPendingConversation(ctx,bridge),false);assert.equal(request,'deleted')
  ctx.slots.entries=()=>[];request='left';assert.equal(openPendingConversation(ctx,bridge),false)
 })
+
+// ── 2026-11-14「先开一个会话」误报回归：投影拿不到 current 时用 DOM 标记兜底 ──────────
+test('session marker on <html> rescues a projection without current',()=>{
+ const marked={documentElement:{getAttribute:name=>name==='data-dsh-session-id'?'left':null}}
+ assert.deepEqual(focusedSession({byId:{left:{displayTitle:'左边'}}},null,marked),{id:'left',title:'左边'})
+ // 快照有 current 时仍以快照为真源（标记不夺权）
+ assert.deepEqual(focusedSession(snapshot,'',marked),{id:'left',title:'左边'})
+ // 标记指向已不存在的会话：不猜，返回空
+ assert.deepEqual(focusedSession({byId:{}},null,marked),{id:'',title:''})
+ // 既无快照也无标记：空（这才是真正的「没有会话」）
+ assert.deepEqual(focusedSession({byId:{}},null,undefined),{id:'',title:''})
+})
+test('a resolvable session still publishes during a reconnect projection gap',()=>{
+ let state={phase:'pending',current:'left',byId:{left:{displayTitle:'左边'}}},queued=[]
+ let subscription
+ const calls=[]
+ const doc={visibilityState:'visible',documentElement:{},querySelectorAll:()=>[],addEventListener(){},removeEventListener(){}}
+ const env={document:doc,window:{androidBridge:{speechSession(...a){calls.push(a)}},addEventListener(){},removeEventListener(){}},queueMicrotask(fn){queued.push(fn)},MutationObserver:class{observe(){}disconnect(){}}}
+ const clean=followCurrentSession({sessions:{list:{getSnapshot:()=>state,subscribe(fn){subscription=fn;return()=>{subscription=null}}}}},{getSnapshot:()=>({status:'ready',value:{enabled:true}}),subscribe(){return()=>{}}},env)
+ const flush=()=>{const q=queued;queued=[];q.forEach(fn=>fn())}
+ assert.deepEqual(calls,[['left','左边',true]])
+ // 重连窗口（phase 非 ready）但 current 还在：照常上报，壳侧不会因此以为「没有会话」
+ state={phase:'pending',current:'left',byId:{left:{displayTitle:'左边2'}}};subscription();flush()
+ assert.deepEqual(calls.at(-1),['left','左边2',true])
+ clean()
+})

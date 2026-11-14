@@ -110,6 +110,14 @@ class OverlayService : Service() {
   // ── 引擎维/会话维状态（协作类经 internal 共享） ──────────────────
   internal var activeSessionId = ""              // Mirrors the current DeepCode chat / active lane.
   internal var activeSessionTitle = ""
+  // 目标会话来源：plugin = JS 投影（快取）/ engine = 引擎 session/list（权威兜底）。
+  internal var sessionSource = ""
+  // 引擎兜底解析的候选列表（会话行切换与「只有一个会话」判定都用它，恒按最近活动排序）。
+  internal val sessionItems = ArrayList<OverlaySessionTarget.Item>()
+  private var resolving = false
+  private var resolvedAt = 0L
+  private var cycling = false
+  private val resolveWaiters = ArrayList<(String) -> Unit>()
   internal var engineRunning = false             // 引擎维（应用级）
   internal var sessionBusy = false               // 会话维（工作中）
   internal var toolCount = 0                     // 当前轮次工具调用数
@@ -314,6 +322,11 @@ class OverlayService : Service() {
     panelParams = pp
     positionPanel()
     speech.watch()
+    // 展开即校准目标会话：投影可能从未到达（插件未开），这里用引擎 session/list 兜底，
+    // 让面板会话行、发送、停止、看实时在展开后 1 次网络往返内全部可用。
+    ensureSession(quiet = true) {}
+    panel.refreshSessionRow()
+    panel.refreshCaptionState()
     unit.visibility = View.VISIBLE
     try { wm.addView(unit, pp) } catch (_: Exception) {}
     unit.post { positionPanel() }   // 首帧拿到真实宽高后再精确对位一次
@@ -335,13 +348,128 @@ class OverlayService : Service() {
     panel.unitView?.post { positionPanel() }
   }
 
-  internal fun followSpeechSession(){
-    val changed=activeSessionId!=SpeechSessionFocus.id
-    if(changed){panel.saveDraft(activeSessionId);sessionBusy=false;currentToolName="";currentToolSummary="";toolCount=0;optimisticBusyAt=0}
-    activeSessionId=SpeechSessionFocus.id;activeSessionTitle=SpeechSessionFocus.title
-    if(changed)panel.restoreDraft(activeSessionId)
-    if(SpeechSessionFocus.enabled)speech.watch() else speech.disable()
+  /**
+   * 目标会话落地（唯一写入口）：投影（plugin）与引擎兜底（engine）都走这里，
+   * 保证草稿保存/恢复、忙态清零、面板会话行刷新、语音视图跟随四件事只实现一次。
+   */
+  internal fun adoptSession(id: String, title: String, source: String) {
+    if (id.isBlank()) return
+    val changed = activeSessionId != id
+    if (changed) {
+      panel.saveDraft(activeSessionId); sessionBusy = false; currentToolName = ""
+      currentToolSummary = ""; toolCount = 0; optimisticBusyAt = 0
+    }
+    activeSessionId = id; activeSessionTitle = title; sessionSource = source
+    if (changed) {
+      panel.restoreDraft(id)
+      if (SpeechSessionFocus.enabled || speech.captionsManual()) speech.watch()
+    }
+    panel.refreshSessionRow()
     panel.onPendingChanged()
+    refreshBallKeyFocus()
+  }
+
+  /** 面板会话行标签（空 = 尚未解析到会话）。 */
+  internal fun sessionLabel(): String =
+    if (activeSessionId.isBlank()) "" else OverlaySessionTarget.label(activeSessionId, activeSessionTitle)
+
+  /**
+   * 目标会话解析：已知则直接用；未知则问引擎（`session/list`，权威真源）。
+   * 失败/无会话时给出**准确**提示，绝不再把「投影没到」说成「没有会话」。
+   */
+  internal fun ensureSession(quiet: Boolean = false, force: Boolean = false, onReady: (String) -> Unit = {}) {
+    val known = activeSessionId
+    if (known.isNotBlank() && !force) { onReady(known); return }
+    // 注意：这里不按 engineRunning 提前退出——探活每 10s 一次，刚启动时它还是 false，
+    // 提前退出会把「引擎其实在跑」误判成离线。直接问引擎，失败按读取失败提示。
+    if (resolving) { resolveWaiters.add(onReady); return }
+    val now = android.os.SystemClock.uptimeMillis()
+    if (!force && now - resolvedAt < 4000L) { onReady(known); return }
+    resolving = true; resolvedAt = now
+    resolveWaiters.add(onReady)
+    Thread {
+      val result = runCatching {
+        VoiceAgentRpc(applicationContext).call("session/list", JSONObject().put("_request", JSONObject()))
+      }
+      main.post {
+        resolving = false
+        result.onSuccess { value ->
+          val items = OverlaySessionTarget.itemsFrom(value)
+          sessionItems.clear(); sessionItems.addAll(items)
+          val pick = OverlaySessionTarget.pick(items, activeSessionId)
+          if (pick == null) {
+            // 引擎明确回答「一条会话都没有」：清空旧目标，避免把提示发到不存在的会话。
+            if (activeSessionId.isNotBlank()) {
+              activeSessionId = ""; activeSessionTitle = ""; sessionSource = ""
+              panel.refreshSessionRow()
+            }
+            if (!quiet) flashStatus(OverlaySessionTarget.NO_SESSION_MESSAGE)
+            flushResolvers("")
+          } else {
+            adoptSession(pick.id, pick.title, "engine")
+            flushResolvers(pick.id)
+          }
+        }.onFailure {
+          // 读不到 ≠ 没有：保留已知目标（若有），只报读取失败。
+          if (!quiet) flashStatus(OverlaySessionTarget.LIST_FAILED_MESSAGE)
+          flushResolvers(activeSessionId)
+        }
+      }
+    }.start()
+  }
+
+  private fun flushResolvers(id: String) {
+    val waiters = ArrayList(resolveWaiters); resolveWaiters.clear()
+    for (w in waiters) runCatching { w(id) }
+  }
+
+  /** 会话行点击：按引擎列表顺序切到下一个会话（首次点击先刷新一次列表）。 */
+  internal fun cycleSession() {
+    if (cycling) return
+    if (sessionItems.size < 2) {
+      cycling = true
+      ensureSession(force = true) {
+        main.post {
+          cycling = false
+          if (sessionItems.size >= 2) advanceSession()
+          else flashStatus(if (activeSessionId.isBlank()) OverlaySessionTarget.NO_SESSION_MESSAGE else "只有一个会话")
+        }
+      }
+      return
+    }
+    advanceSession()
+  }
+
+  private fun advanceSession() {
+    if (sessionItems.size < 2) { flashStatus("只有一个会话"); return }
+    val idx = sessionItems.indexOfFirst { it.id == activeSessionId }
+    val next = sessionItems[if (idx < 0) 0 else (idx + 1) % sessionItems.size]
+    adoptSession(next.id, next.title, "engine")
+    flashStatus("已切到会话：" + OverlaySessionTarget.label(next.id, next.title))
+  }
+
+  /** 「看 AI 实时」按钮：开/关官方回复字幕（正文流式打字，不朗读、不录音）。 */
+  internal fun toggleCaptions() {
+    if (speech.captionsOn()) {
+      speech.stopCaptions(); panel.refreshCaptionState(); flashStatus("已关闭 AI 实时"); return
+    }
+    ensureSession { sid ->
+      if (sid.isBlank()) { flashStatus(OverlaySessionTarget.NO_SESSION_MESSAGE); return@ensureSession }
+      speech.startCaptions(sid)
+      panel.refreshCaptionState()
+      flashStatus(if (speech.captionsOn()) "正在看 AI 实时" else "无法开启 AI 实时")
+    }
+  }
+
+  internal fun followSpeechSession() {
+    val projected = SpeechSessionFocus.id
+    if (projected.isNotBlank()) adoptSession(projected, SpeechSessionFocus.title, "plugin")
+    // 投影为空（插件作用域未 ready / 文档不可见 / 插件未开）不再清空 activeSessionId：
+    // 引擎 session/list 才是权威，限频兜底解析一次（4s 内不重复请求）。
+    else ensureSession(quiet = true, force = false)
+    if (SpeechSessionFocus.enabled || speech.captionsManual()) speech.watch() else speech.disable()
+    panel.onPendingChanged()
+    panel.refreshSessionRow()
     refreshBallKeyFocus()
   }
 
@@ -613,44 +741,51 @@ class OverlayService : Service() {
   internal fun requestStop() {
     if (!sessionBusy) return
     if (!engineRunning) { flashStatus("引擎离线，无法停止"); return }
-    if (activeSessionId.isEmpty()) { flashStatus("无活动会话"); return }
-    setHalo(Halo.WORKING)
-    postRpc("session/cancel", JSONObject().put("request", JSONObject().put("sessionId", activeSessionId))) { code, body ->
-      if (code == 200) flashStatus("已发送停止指令") else flashStatus("停止失败（HTTP $code）")
+    // 目标会话统一走兜底解析（投影缺失时问引擎），不再因 activeSessionId 为空而误报。
+    ensureSession { sid ->
+      if (sid.isBlank()) { flashStatus(OverlaySessionTarget.NO_SESSION_MESSAGE); return@ensureSession }
+      setHalo(Halo.WORKING)
+      postRpc("session/cancel", JSONObject().put("request", JSONObject().put("sessionId", sid))) { code, _ ->
+        if (code == 200) flashStatus("已发送停止指令") else flashStatus("停止失败（HTTP $code）")
+      }
     }
   }
 
-  /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；目标会话 = 选择器当前项（空 = 新会话自动 create）。 */
+  /** 发送/插话：steer（工作中打断当前轮）/ queue（空闲新轮次）；目标会话 = 兜底解析结果。 */
   internal fun requestSend() {
     val text = panel.inputBox?.text?.toString()?.trim() ?: return
     if (text.isEmpty()) return
-    if (activeSessionId.isBlank()) { flashStatus("先在 DeepCode 打开一个会话"); return }
-    val sentSessionId=activeSessionId
     if (!engineRunning) { flashStatus("引擎离线"); return }
+    // 先解析目标会话（引擎兜底），拿到非空 id 再发送；解析失败时输入保留、提示准确。
+    ensureSession { sid ->
+      if (sid.isBlank()) { flashStatus(OverlaySessionTarget.NO_SESSION_MESSAGE); return@ensureSession }
+      sendPrompt(sid, text)
+    }
+  }
+
+  private fun sendPrompt(sessionId: String, text: String) {
+    val sentSessionId = sessionId
     panel.inputBox?.setText("")
     val steer = sessionBusy   // 发送前的忙态决定模式与提示语（成功回调里已被乐观置忙覆盖）
     // 0.1.2-rc.1 SessionPromptRequest：requestId 必填（幂等键）+ sessionId/mode/content
     val payload = JSONObject()
       .put("requestId", "overlay-" + System.currentTimeMillis() + "-" + (0..999).random())
-      .put("sessionId", activeSessionId)
+      .put("sessionId", sentSessionId)
       .put("mode", if (steer) "steer" else "queue")
       .put("content", org.json.JSONArray().put(
         JSONObject().put("type", "text").put("text", text)))
-    val send = Runnable {
-      postRpc("session/prompt", JSONObject().put("request", payload)) { code, body ->
-        if (code == 200) {
-          // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
-          // 原本显示「空闲」，实测被用户点名（2026-09-05）；45s 无 live 确认由探活兜底回退。
-          if(activeSessionId==sentSessionId)markBusyOptimistic()
-          flashStatus(if (steer) "已插话" else "已发送")
-        } else {
-          // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
-          panel.restoreFailedDraft(sentSessionId,text)
-          flashStatus("发送失败（HTTP $code）")
-        }
+    postRpc("session/prompt", JSONObject().put("request", payload)) { code, body ->
+      if (code == 200) {
+        // 发送成功：立即亮工作态（乐观忙态）——live 事件（turn_start/tool_call）到来前
+        // 原本显示「空闲」，实测被用户点名（2026-09-05）；45s 无 live 确认由探活兜底回退。
+        if (activeSessionId == sentSessionId) markBusyOptimistic()
+        flashStatus(if (steer) "已插话" else "已发送")
+      } else {
+        // 发送失败：回填已输入文本 + 提示（避免用户以为发出去了——#4）
+        panel.restoreFailedDraft(sentSessionId, text)
+        flashStatus("发送失败（HTTP $code）")
       }
     }
-    send.run()
   }
 
   /** 从 session.create 的 server-response 中取 sessionId（兼容 result.value / 嵌套 JSON 字符串两种形态）。 */

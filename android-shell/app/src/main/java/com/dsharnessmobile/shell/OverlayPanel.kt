@@ -80,6 +80,28 @@ class OverlayPanel(private val svc: OverlayService) {
   private val liveTick=object:Runnable{override fun run(){refreshLive();svc.main.postDelayed(this,400)}}
   private var speechHint:TextView?=null
   private var editorRow:View?=null
+  // ── 会话行 + 「看 AI 实时」按钮（2026-11-14 全量修复悬浮窗） ─────────
+  // 会话行显示悬浮窗**实际**的目标会话（来源可能是 JS 投影，也可能是引擎 session/list 兜底），
+  // 点击切换下一个会话；右侧按钮开关官方回复的实时字幕。
+  private var sessionChip:TextView?=null
+  private var captionButton:CompanionButton?=null
+  internal fun refreshSessionRow(){
+    val label=svc.sessionLabel()
+    sessionChip?.apply{
+      text=if(label.isBlank())"会话：未连接" else "会话：$label"
+      setTextColor(if(label.isBlank())0xFF7C8795.toInt() else 0xFF263447.toInt())
+      contentDescription=if(label.isBlank())"目标会话未解析，点按刷新" else "目标会话 $label，点按切换会话"
+    }
+  }
+  internal fun refreshCaptionState(){
+    captionButton?.apply{
+      val on=runCatching{svc.speech.captionsOn()}.getOrDefault(false)
+      active=on
+      contentDescription=if(on)"关闭 AI 实时" else "看 AI 实时"
+      alpha=1f
+      invalidate()
+    }
+  }
   private val drafts=LinkedHashMap<String,String>()
   internal fun saveDraft(id:String){if(id.isNotBlank()){drafts[id]=inputBox?.text?.toString().orEmpty();while(drafts.size>32)drafts.remove(drafts.keys.first())}}
   internal fun restoreDraft(id:String){inputBox?.setText(drafts[id].orEmpty())}
@@ -218,6 +240,19 @@ class OverlayPanel(private val svc: OverlayService) {
       addView(voice,LinearLayout.LayoutParams(size(48),size(48)))
       addView(live,LinearLayout.LayoutParams(size(48),size(48)))
     }
+    // 会话行：目标会话（点按切换）+「看 AI 实时」开关。单独成行，不动既有一行三键的宽度约定。
+    val chip=TextView(svc).apply{
+      textSize=11f;gravity=Gravity.CENTER_VERTICAL;setPadding(size(10),0,size(8),0)
+      setTextColor(0xFF263447.toInt());maxLines=1;ellipsize=android.text.TextUtils.TruncateAt.END
+      background=GradientDrawable().apply{cornerRadius=15*dp;setColor(0x1A4D6BFE);setStroke(size(1),0x334D6BFE)}
+      setOnClickListener{svc.cycleSession()}
+    };sessionChip=chip
+    val captions=button("captions","看 AI 实时"){svc.toggleCaptions()};captionButton=captions
+    val sessionRow=LinearLayout(svc).apply{
+      orientation=LinearLayout.HORIZONTAL;gravity=Gravity.CENTER_VERTICAL;setPadding(size(8),0,size(8),size(2))
+      addView(chip,LinearLayout.LayoutParams(0,size(30),1f))
+      addView(captions,LinearLayout.LayoutParams(size(40),size(40)))
+    }
     val unit=object:LinearLayout(svc){
       override fun onAttachedToWindow(){super.onAttachedToWindow();svc.main.removeCallbacks(liveTick);svc.main.post(liveTick)}
       override fun onDetachedFromWindow(){svc.main.removeCallbacks(liveTick);super.onDetachedFromWindow()}
@@ -228,6 +263,7 @@ class OverlayPanel(private val svc: OverlayService) {
       background=GradientDrawable().apply{cornerRadius=28*dp;setColor(0xEAE8EEF1.toInt());setStroke(size(1),0x80FFFFFF.toInt())}
       elevation=8*dp
       addView(toolbar)
+      addView(sessionRow)
       speechHint=TextView(svc).apply{
         textSize=11f;setTextColor(0xFF63718D.toInt());gravity=Gravity.CENTER;visibility=View.GONE
         setPadding(0,0,0,size(9));importantForAccessibility=View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -236,7 +272,9 @@ class OverlayPanel(private val svc: OverlayService) {
       // Approval controls only appear when explicitly requested by the agent.
       addView(buildPendingBox(dp))
     }
-    unitView=unit;unit.requestFocus();return unit
+    unitView=unit;unit.requestFocus()
+    refreshSessionRow();refreshCaptionState()
+    return unit
   }
 
   /** 按当前主题刷新展开态配色（unit 背景/描边、状态文字、输入框、分隔线、箭头）。 */

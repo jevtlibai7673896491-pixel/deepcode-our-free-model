@@ -32,6 +32,8 @@ internal class CompanionButton(context:Context,var symbol:String):View(context){
    "edit"->{path(9f,5f,5f,5f,4f,6f,4f,19f,5f,20f,18f,20f,19f,19f,19f,15f);path(9f,15f,10f,11f,18f,3f,21f,6f,13f,14f,9f,15f)}
    "microphone"->{c.drawRoundRect(9f,3f,15f,15f,3f,3f,paint);path(5f,11f,5f,12f);c.drawArc(5f,5f,19f,19f,0f,180f,false,paint);path(19f,12f,19f,11f);path(12f,19f,12f,22f);path(8f,22f,16f,22f)}
    "live"->{for(i in 0..4){val h=floatArrayOf(4f,12f,18f,12f,4f)[i];c.drawLine(3f+i*4.5f,12f-h/2,3f+i*4.5f,12f+h/2,paint)}}
+   // 看 AI 实时：眼睛轮廓（虹膜实心）——「看着 AI 写」的通用隐喻，描边风与其它图标一致。
+   "captions"->{c.drawOval(2f,7f,22f,17f,paint);paint.style=Paint.Style.FILL;c.drawCircle(12f,12f,2.4f,paint);paint.style=Paint.Style.STROKE}
    "collapse"->path(6f,9f,12f,15f,18f,9f)
    "send"->{path(6f,10f,12f,4f,18f,10f);path(12f,4f,12f,20f)}
    "stop"->{paint.style=Paint.Style.FILL;c.drawRoundRect(6f,6f,18f,18f,2f,2f,paint)}

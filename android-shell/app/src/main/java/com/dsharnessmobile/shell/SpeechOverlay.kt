@@ -37,6 +37,8 @@ internal class SpeechOverlay(private val svc: OverlayService) {
  private var primed=false
  private var pending=false
  private var enabled=false
+ private var manual=false
+ private var suppressed=false
  private var generation=0L
  private var target=""
  private var revision=-1
@@ -69,9 +71,35 @@ internal class SpeechOverlay(private val svc: OverlayService) {
  private val lockedReceiver=object:BroadcastReceiver(){override fun onReceive(c:Context?,i:Intent?){if(i?.action==Intent.ACTION_SCREEN_OFF){removeText();stopAudio()}}}
  init {inputManager.registerInputDeviceListener(deviceListener,main);SpeechPlayback.cancel={stopAudio()};svc.registerReceiver(lockedReceiver,IntentFilter(Intent.ACTION_SCREEN_OFF))}
  fun notice(message:String){error=message;android.widget.Toast.makeText(svc,message,android.widget.Toast.LENGTH_SHORT).show()}
- fun watch(){
-  if(dead||!SpeechSessionFocus.enabled)return
+ /** 字幕视图是否运行中（enabled）+ 是否为用户手动开启（manual）。 */
+ fun captionsOn():Boolean=enabled
+ fun captionsManual():Boolean=manual
+ fun watch(manual:Boolean=false){
+  if(dead)return
+  if(manual){this.manual=true;suppressed=false}
+  // 自动跟随只在语音插件投影开启时生效；手动「看 AI 实时」不受投影约束（插件真关时由 feed 报错）。
+  if(!manual&&!enabled&&(!SpeechSessionFocus.enabled||suppressed))return
   if(!enabled){replyPolicy.reset(System.currentTimeMillis());enabled=true;generation++;seen=0;primed=false;spoken="";error="";main.post(tick);main.post(feedbackTick)}
+  svc.panel.refreshCaptionState()
+ }
+ /**
+  * 「看 AI 实时」：把当前会话的回复正文流式打到悬浮字幕上（只读展示，不录音、不朗读）。
+  * 会话 id 由调用方（OverlayService.ensureSession）解析，这里只负责视图与跟随切换。
+  */
+ fun startCaptions(sessionId:String){
+  if(dead||sessionId.isBlank())return
+  manual=true;suppressed=false
+  if(svc.activeSessionId!=sessionId)svc.adoptSession(sessionId,svc.activeSessionTitle,"engine")
+  if(target!=sessionId){target=sessionId;generation++;seen=0;primed=false;spoken="";error="";transport?.cancel();removeText()}
+  watch(manual=true)
+  svc.panel.refreshCaptionState()
+ }
+ /** 关闭「看 AI 实时」：连自动跟随也一起压住，直到用户再次点击或投影显式开启。 */
+ fun stopCaptions(){
+  manual=false;suppressed=true
+  disable()
+  suppressed=true
+  svc.panel.refreshCaptionState()
  }
  fun activateAndToggle(){
   watch()
@@ -81,7 +109,15 @@ internal class SpeechOverlay(private val svc: OverlayService) {
    if(ongoing.optString("phase")=="recording"){endingUntil=SystemClock.uptimeMillis()+1500;svc.panel.speechPhase("transcribing");svc.startService(Intent(svc,BackgroundVoiceService::class.java).setAction(BackgroundVoiceService.FINISH))}
    return
   }
-  if(!enabled||svc.activeSessionId.isBlank()){svc.flashStatus("先在 DeepCode 打开一个会话");return}
+  // 目标会话缺失时不再直接喊「先开一个会话」：先让 OverlayService 走引擎兜底解析，
+  // 解析到会话再继续录音（用户明明已经开了会话，2026-11-14 回归）。
+  if(svc.activeSessionId.isBlank()){
+   svc.ensureSession{sid->
+    if(sid.isNotBlank())activateAndToggle() else svc.flashStatus(OverlaySessionTarget.NO_SESSION_MESSAGE)
+   }
+   return
+  }
+  if(!enabled){svc.flashStatus("语音服务未启用：在 DeepCode 的语音插件里开启后可录音");return}
   if(target!=svc.activeSessionId){target=svc.activeSessionId;generation++;seen=0;primed=false;spoken="";transport?.cancel();removeText()}
   stopAudio()
   if(!asrAvailable){notice("ASR 已关闭，可继续查看回复");return}
@@ -101,15 +137,15 @@ internal class SpeechOverlay(private val svc: OverlayService) {
   try{error="";startingUntil=SystemClock.uptimeMillis()+3000;svc.panel.speechPhase("preparing");svc.startForegroundService(Intent(svc,BackgroundVoiceService::class.java).setAction(BackgroundVoiceService.START).putExtra("sessionId",target).putExtra("direct",true))}
   catch(e:Exception){notice("无法后台启动麦克风，请打开 DeepCode 后再试")}
  }
- fun disable(){NotificationAttention.clearCompanion();keys.reset();enabled=false;generation++;main.removeCallbacks(tick);main.removeCallbacks(feedbackTick);replyPolicy.clear(System.currentTimeMillis());feedbackTarget="";awaitingReply=false;feedPhase="idle";startingUntil=0;endingUntil=0;transport?.cancel();transport=null;stopAudio();removeText();if(BackgroundVoiceService.snapshot.optBoolean("direct"))svc.stopService(Intent(svc,BackgroundVoiceService::class.java));error="";csrf="";revision=-1;gamepad=false;primed=false;svc.panel.speechPhase("idle");svc.speechBall(false)}
+ fun disable(){manual=false;suppressed=false;NotificationAttention.clearCompanion();keys.reset();enabled=false;generation++;main.removeCallbacks(tick);main.removeCallbacks(feedbackTick);replyPolicy.clear(System.currentTimeMillis());feedbackTarget="";awaitingReply=false;feedPhase="idle";startingUntil=0;endingUntil=0;transport?.cancel();transport=null;stopAudio();removeText();if(BackgroundVoiceService.snapshot.optBoolean("direct"))svc.stopService(Intent(svc,BackgroundVoiceService::class.java));error="";csrf="";revision=-1;gamepad=false;primed=false;svc.panel.speechPhase("idle");svc.speechBall(false)}
  fun destroy(){inputManager.unregisterInputDeviceListener(deviceListener);dead=true;disable();SpeechPlayback.cancel=null;worker.shutdownNow();playbackWorker.shutdownNow();runCatching{svc.unregisterReceiver(lockedReceiver)}}
  fun resized(){removeText()}
  fun foregroundChanged(){if(SpeechSessionFocus.foreground)removeText()}
  fun replyStatus():JSONObject = JSONObject().put("visible",textView!=null).put("sessionId",replySession)
   .put("busy",textView?.busy?:false).put("textLength",textView?.textLength?:0)
   .put("shader",textView?.surface?.shaderActive?:false).put("frames",textView?.surface?.frames?:0)
-  .put("fading",fading)
-  .put("enabled",enabled).put("target",target).put("selectedSession",svc.activeSessionId)
+  .put("fading",fading).put("manual",manual).put("suppressed",suppressed)
+  .put("enabled",enabled).put("target",target).put("source",svc.sessionSource).put("selectedSession",svc.activeSessionId)
   .put("interactive",power.isInteractive).put("locked",keyguard.isKeyguardLocked)
   .put("foreground",SpeechSessionFocus.foreground).put("feedPhase",feedPhase).put("pending",pending)
  private fun openHistory(){
@@ -184,7 +220,11 @@ internal class SpeechOverlay(private val svc: OverlayService) {
     main.post{
      pending=false;if(!enabled||dead||token!=generation)return@post
      result.onSuccess{(config,feed)->
-      if(!config.optBoolean("enabled")){disable();return@onSuccess}
+      if(!config.optBoolean("enabled")){
+       // 语音插件被关：这是「插件未开」，不是「没有会话」——提示必须分得清。
+       val message="语音服务插件已关闭：在 DeepCode 插件设置里开启后可看 AI 实时"
+       if(error!=message){error=message;notice(message)}
+       disable();return@onSuccess}
       asrAvailable=config.optBoolean("asrEnabled")
       if(revision!=config.optInt("revision")||csrf!=config.optString("csrf")){if(revision!=-1){replyPolicy.reset(System.currentTimeMillis());removeText();stopAudio();seen=feed.optLong("seq");spoken=feed.optString("finalId")};revision=config.optInt("revision");csrf=config.optString("csrf")}
       gamepad=config.optBoolean("overlayGamepad",true)

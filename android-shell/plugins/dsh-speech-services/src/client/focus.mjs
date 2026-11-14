@@ -11,10 +11,18 @@ export function openPendingConversation(ctx,bridge){
  bridge.speechOpenAck(id)
  return true
 }
-/** Project the active workbench lane, otherwise the ordinary current chat. */
-export function focusedSession(snapshot, laneId) {
- const id = laneId && snapshot.byId?.[laneId] ? laneId : snapshot.current
- const row = id && snapshot.byId?.[id]
+/**
+ * Project the active workbench lane, otherwise the ordinary current chat.
+ *
+ * 2026-11-14 回归：「先开一个会话」误报的真因是这里——壳侧只认这条投影，而 `snapshot.current`
+ * 在某些客户端版本/重连窗口里会短暂缺失（页面自己用 `<html data-dsh-session-id>` 发布同一份真源，
+ * 见 dsh-client-ui-responsive/src/client/mobile/session-marker.ts）。因此再补一层 DOM 标记兜底：
+ * 只有当快照与标记都拿不到会话时，才认定为「没有会话」。
+ */
+export function focusedSession(snapshot, laneId, doc) {
+ const marker = doc?.documentElement?.getAttribute?.('data-dsh-session-id') || ''
+ const id = laneId && snapshot?.byId?.[laneId] ? laneId : (snapshot?.current || marker)
+ const row = id && snapshot?.byId?.[id]
  return row ? {id, title: row.displayTitle || '当前会话'} : {id:'',title:''}
 }
 export function followCurrentSession(ctx,scope,env=globalThis){
@@ -27,10 +35,12 @@ export function followCurrentSession(ctx,scope,env=globalThis){
   if(config.value?.enabled===true)openPendingConversation(ctx,bridge)
   const lane=[...doc.querySelectorAll('[data-deck-lane][data-active="true"]')].find(e=>e.getClientRects().length)
   const snapshot=ctx.sessions.list.getSnapshot()
+  const enabled=config.value?.enabled===true
   // A reconnect projection can temporarily mask current; it is not a user selection.
-  if(config.value?.enabled===true && snapshot.phase && snapshot.phase!=='ready')return
-  const {id,title}=focusedSession(snapshot,lane?.getAttribute('data-deck-lane'))
-  const enabled=config.value?.enabled===true,key=JSON.stringify([id,title,enabled])
+  // 但只有「拿不到 id」时才放弃本轮上报：拿到 id 就照常同步，避免整体停摆。
+  const {id,title}=focusedSession(snapshot,lane?.getAttribute('data-deck-lane'),doc)
+  if(!id && snapshot.phase && snapshot.phase!=='ready')return
+  const key=JSON.stringify([id,title,enabled])
   if(last===key)return
   bridge.speechSession(id,title,enabled);last=key
  }

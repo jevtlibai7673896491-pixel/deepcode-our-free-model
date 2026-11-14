@@ -59,6 +59,23 @@ jobs:
           echo "plugin entries in snapshot: $(tar -tJf android-shell/app/src/main/assets/snapshot.tar.xz | grep -c 'dsh-our-free-model')"
           tar -tJf android-shell/app/src/main/assets/snapshot.tar.xz | grep -c 'dsh-our-free-model' | grep -qv '^0$'
 
+          # 内置语音服务插件（2026-11-14 悬浮窗全量修复）：assets/plugins/** 按 .gitignore 不入库，
+          # 必须在构建期现建，否则 installSpeechPlugin() 在设备上读不到资产、静默跳过 —— 悬浮窗的
+          # 「看 AI 实时」/语音输入会整体失效（这正是「先开一个会话」连锁症状的一半）。
+          # 同一个业务步骤内完成：装依赖 → esbuild 出 lib/{index,client}.js → 单测 → 落到 assets。
+          ( cd android-shell/plugins/dsh-speech-services
+            npm ci --legacy-peer-deps --no-audit --no-fund
+            npm run build
+            node --test tests/focus.test.mjs )
+          python3 scripts/stage-speech-services.py
+          test -s android-shell/app/src/main/assets/plugins/dsh-speech-services/lib/index.js
+          test -s android-shell/app/src/main/assets/plugins/dsh-speech-services/lib/client.js
+          test -s android-shell/app/src/main/assets/patched/speech-services-composition.yml
+          # 语音插件客户端必须带本轮修复（会话标记兜底），否则打进去的是旧投影逻辑。
+          grep -q "data-dsh-session-id" android-shell/app/src/main/assets/plugins/dsh-speech-services/lib/client.js
+          echo "speech plugin staged: $(wc -c < android-shell/app/src/main/assets/plugins/dsh-speech-services/lib/client.js) bytes client.js"
+          ls -l android-shell/app/src/main/assets/plugins/dsh-speech-services/lib/
+
       - name: 3) assembleDebug
         run: |
           set -e
@@ -69,10 +86,20 @@ jobs:
           chmod -R u+w "$HOME/.config" 2>/dev/null || true
           cd android-shell
           chmod +x gradlew
+          # 悬浮窗「先开一个会话」误报回归：目标会话解析 + 调用点契约（纯 JVM，无需设备）。
+          ./gradlew :app:testDebugUnitTest -PruntimeAbi=arm64-v8a --no-daemon --console=plain \
+            --tests 'com.dsharnessmobile.shell.OverlaySessionTargetTest'
           ./gradlew :app:assembleDebug -PruntimeAbi=arm64-v8a --no-daemon --console=plain
           ls -l app/build/outputs/apk/debug/
           APK=$(ls app/build/outputs/apk/debug/*.apk | head -n1)
           "${ANDROID_HOME}/build-tools/36.0.0/aapt" dump badging "$APK" | head -n 3
+          # 产物自证（防「改了没打进去」）：语音插件资产 + 壳侧目标会话兜底文案必须在 APK 内。
+          unzip -Z1 "$APK" | grep -q "assets/plugins/dsh-speech-services/lib/client.js"
+          unzip -p "$APK" assets/plugins/dsh-speech-services/lib/client.js | grep -q "data-dsh-session-id"
+          for dex in $(unzip -Z1 "$APK" | grep -E '^classes[0-9]*\.dex$'); do unzip -p "$APK" "$dex"; done \
+            | grep -qa "还没有会话：在 DeepCode 里新建一个会话"
+          echo "apk self-check: speech plugin asset + overlay session fallback string present"
+          unzip -p "$APK" assets/patched/speech-services-composition.yml | head -n 5
 
       - name: 4) 上传 APK 产物
         uses: actions/upload-artifact@v4

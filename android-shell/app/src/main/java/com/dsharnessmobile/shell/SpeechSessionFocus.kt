@@ -13,7 +13,9 @@ internal object SpeechSessionFocus {
  var title=""; private set
  var enabled=false; private set
  fun update(id:String,title:String,enabled:Boolean){
-  this.id=if(enabled)id else "";this.title=if(enabled)title else "";this.enabled=enabled
+  // 会话身份（id/title）与语音开关（enabled）解耦：关掉语音不该让悬浮窗「忘记」当前会话，
+  // 否则发送/录音/看实时会误报「先开一个会话」（2026-11-14 用户回归实测）。teardown 仍推空 id。
+  this.id=id;this.title=title;this.enabled=enabled
   OverlayService.instance?.followSpeechSession()
  }
 }
