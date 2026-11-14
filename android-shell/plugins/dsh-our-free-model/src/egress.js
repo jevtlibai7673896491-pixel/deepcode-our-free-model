@@ -194,6 +194,29 @@ export async function laneProxyEcho({ signal, timeoutMs = 8000 } = {}) {
  * origin-form the loopback relay serves. Call sites keep `redirect: 'error'` in
  * `init`, so a 3xx is a response, never a second hop that would dodge the outlet.
  */
+/** Which transport a POST to the free lane will actually use, for the settings page. */
+export function freeLaneTransportReport() {
+  const requested = process.env.OUR_FREE_MODEL_FREE_TRANSPORT ?? 'auto'
+  const executable = findBunExecutable()
+  const effective = requested === 'node'
+    ? 'node'
+    : executable !== undefined
+      ? 'bun'
+      : requested === 'bun' ? 'bun (missing)' : 'node (bun not found)'
+  return { requested, effective, bun: executable ?? null }
+}
+
+let nodeFallbackAnnounced = false
+
+/** One line per process: the lane is running without Bun, and why that is fine. */
+function announceNodeFallback() {
+  if (nodeFallbackAnnounced) return
+  nodeFallbackAnnounced = true
+  try {
+    console.warn('our-free-model: 本机未找到 Bun —— 免费车道推理自动改用 Node 传输（不影响可用性）。如需 Bun 指纹，请安装 Bun 或设置 OUR_FREE_MODEL_BUN。/ Bun not found: the free lane falls back to the Node transport automatically; install Bun or set OUR_FREE_MODEL_BUN to pin the Bun fingerprint.')
+  } catch { /* a host without console still has the summary bit */ }
+}
+
 export async function egressFetch(url, init) {
   const relay = activeRelay
   const targetUrl = new URL(url instanceof Request ? url.url : String(url))
@@ -211,11 +234,15 @@ export async function egressFetch(url, init) {
     // exits somewhere else than everything else.
     const laneProxy = freeLaneProxy ?? (relay !== null ? new URL(`http://ofm:${relay.key}@${RELAY_HOST}:${relay.port}`) : envProxyFor(targetUrl.hostname) ?? null)
     const isPost = (init?.method ?? (url instanceof Request ? url.method : 'GET')).toUpperCase() !== 'GET'
-    if (transport === 'node') {
+    /** The pre-Bun transport: this process's own fetch (undici), or the lane's
+     *  proxy dialog when one is configured. One closure, two callers: an explicit
+     *  `OUR_FREE_MODEL_FREE_TRANSPORT=node`, and the `auto` fallback below. */
+    const nodeLane = () => {
       if (relay !== null && relay.dead) throw new Error('the configured egress relay is not running')
       if (laneProxy !== null) return laneProxiedFetch(url, init, laneProxy)
       return fetch(url, init)
     }
+    if (transport === 'node') return nodeLane()
     if (transport !== 'auto' && transport !== 'bun') throw new Error('OUR_FREE_MODEL_FREE_TRANSPORT must be auto, bun, or node')
     // The GET listing may ride Node: it is a read, not an inference turn, and
     // a machine without Bun must still be able to learn the roster (a missing
@@ -235,11 +262,26 @@ export async function egressFetch(url, init) {
     }
     const executable = findBunExecutable()
     if (!executable) {
-      // This sentence is the user's only answer until they install Bun, so it
-      // carries the fix inline, bilingually, without an "upstream failed" wrap.
-      const error = new Error('OpenCode 免费车道推理需要本机 Bun：请安装 Bun（https://bun.sh 或 npm i -g bun）后重试，或把 Bun 可执行文件路径写入 OUR_FREE_MODEL_BUN 环境变量。/ Install Bun or set OUR_FREE_MODEL_BUN to its executable path (OUR_FREE_MODEL_FREE_TRANSPORT=node restores the legacy transport).')
-      error.laneConfig = true
-      throw error
+      if (transport === 'bun') {
+        // This sentence is the user's only answer until they install Bun, so it
+        // carries the fix inline, bilingually, without an "upstream failed" wrap.
+        const error = new Error('OpenCode 免费车道推理需要本机 Bun：请安装 Bun（https://bun.sh 或 npm i -g bun）后重试，或把 Bun 可执行文件路径写入 OUR_FREE_MODEL_BUN 环境变量。/ Install Bun or set OUR_FREE_MODEL_BUN to its executable path (OUR_FREE_MODEL_FREE_TRANSPORT=node restores the legacy transport).')
+        error.laneConfig = true
+        throw error
+      }
+      // `auto` and a machine without Bun (Termux/Android, a slim container): the
+      // lane used to refuse the turn with a lane-config error here, and every
+      // chain that walked free models collapsed into
+      // "unavailable/transient · cooldown 30s · via code:transport" — a message
+      // that names neither Bun nor a way out. The Node transport answers the
+      // gateway (measured 2026-11-14: POST /inference/... on undici returns the
+      // lane's own 429 FreeUsageLimitError, i.e. the request passed the client
+      // gate and was billed against the IP's window), so falling back keeps the
+      // lane usable instead of turning a missing optional binary into a dead
+      // feature. Announced once per process; the summary reports the effective
+      // transport alongside the requested one.
+      announceNodeFallback()
+      return nodeLane()
     }
     if (relay?.dead) throw new Error('the configured egress relay is not running')
     // With no explicit proxy, the Bun worker inherits this process's

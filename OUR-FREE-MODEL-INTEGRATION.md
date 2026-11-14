@@ -92,3 +92,34 @@
 - 命名空间未注册 → 不声明；已注册 → 仍声明；无 settings 服务 → 降级不声明；
 - 宿主 `buildModelCatalog` + 插件真实 adapter：复现原缺陷 `groups=0`，修复后 `groups=1`、模型 6 条、无 failures；
 - `prepareCall` 返回可流式句柄，`resolveModel` 给出 `contextWindow=1048576 / defaultMaxTokens=32768`。
+
+## 缺陷修复 2：无 Bun 时推理直接失败 + 组合链只剩 code:transport（2026-11-14）
+
+### 现象
+1. 推理报：`OpenCode 免费车道推理需要本机 Bun：请安装 Bun… (OUR_FREE_MODEL_FREE_TRANSPORT=node restores the legacy transport)`。
+2. 组合链报：`the chain "推荐免费组" exhausted every candidate: deepseek-v4.1-flash-free (unavailable/transient · cooldown 30s · via code:transport); …`
+
+### 根因
+`src/egress.js` 的 `egressFetch()` 对官方免费车道的 **POST 推理**是硬性要求 Bun：
+`findBunExecutable()` 为空时直接抛 `laneConfig` 错误 → `src/http.js` 把它包成 `CODE.transport` →
+`src/route/classify.js` 归类 `unavailable/transient`（30s 冷却）→ 组合链逐个候选阵亡 →
+`src/adapter.js` 的 `describeVerdict()` 只打印类别与 `via code:transport`，把「缺个可选二进制」
+说成了「上游传输故障」。Android/Termux 里没有 Bun，于是免费车道在任何设备上都等于关闭。
+
+### 修复（3 处）
+1. `src/egress.js`：`auto`（默认）在找不到 Bun 时**自动降级到 Node 传输**（与 `=node` 同一条路径：
+   有代理走 `laneProxiedFetch`，无代理走本进程 `fetch`），每进程只提示一次；新增
+   `freeLaneTransportReport()` 暴露 `requested / effective / bun` 三个字段。
+   显式 `OUR_FREE_MODEL_FREE_TRANSPORT=bun` 仍然要求 Bun 并抛原本那句可执行文案（不是静默改变语义）。
+2. `index.js`：启动日志从「无法推理」改为「自动使用 Node 传输（可用）」；`/summary` 增加
+   `freeLane.transportEffective` 与 `bunRequired: false`，设置页不再把可选依赖渲染成阻断项。
+3. `src/adapter.js`：组合链的每个候选失败项现在附带该候选自己的错误句子（`failureDetail()`，
+   截断 180 字），`exhausted every candidate` 不再只有 `via code:transport`。
+
+### 证据
+- 线上：`egressFetch()` 对 `POST https://opencode.ai/inference/openai/v1/chat/completions`
+  在无 Bun 的机器上返回网关自己的 `429 FreeUsageLimitError`（294 ms），即请求已走完传输、
+  通过客户端门禁并计入该 IP 的额度窗口 —— 不再是 lane-config 错误。
+- 离线：`scripts/test-our-free-model-transport.mjs` 10 条断言全 PASS（auto 降级生效、
+  只提示一次、显式 bun 仍抛 laneConfig、显式 node 生效、非法取值报错、报告字段、链路文案）。
+  已接入 CI 第 2 步。

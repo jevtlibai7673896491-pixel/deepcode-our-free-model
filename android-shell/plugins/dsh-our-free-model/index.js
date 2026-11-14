@@ -37,7 +37,7 @@ import { STATE } from './src/probe.js'
 import { generateKey, rankLanAddresses, startForwardServer, startLanRelay } from './src/forward.js'
 import { chanGatewayCredential, chanGatewayEnabled, chanGatewayPort, startChanRelay } from './src/chan-relay.js'
 import { CODE, UpstreamError } from './src/http.js'
-import { egressActive, egressFetch, outletLabel, readOutletSelection, startEgressRelay, setFreeLaneProxy, freeLaneProxyActive, laneProxyEcho } from './src/egress.js'
+import { egressActive, egressFetch, outletLabel, readOutletSelection, startEgressRelay, setFreeLaneProxy, freeLaneProxyActive, laneProxyEcho, freeLaneTransportReport } from './src/egress.js'
 import { directFetch } from './src/eac.js'
 import { clearEacUser, readEacUser, writeEacUser } from './src/eac-user.js'
 import { createEacLoginPoller } from './src/eac-login.js'
@@ -152,9 +152,13 @@ export function apply(ctx, config) {
   // local Bun, and a user who never learns that reads only a failed turn.
   // Probe once at boot — the summary's `bun` bit and this log line are the two
   // surfaces the answer lives on.
+  // Since 2.8.3-android-fix: a missing Bun is no longer a dead lane. The `auto`
+  // transport falls back to this process's own fetch, so the sentence below is
+  // informational — it says what is in use, not what is missing.
   const bunAvailable = findBunExecutable() !== undefined
-  if (!bunAvailable) {
-    logger.warn?.('our-free-model: 未检测到本机 Bun —— OpenCode 免费车道无法推理。请安装 Bun（https://bun.sh 或 npm i -g bun）后重启，或把可执行文件路径写入 OUR_FREE_MODEL_BUN。(Bun not found: the OpenCode free lane cannot run inference)')
+  const freeTransport = freeLaneTransportReport()
+  if (!bunAvailable && freeTransport.effective.startsWith('node')) {
+    logger.info?.('our-free-model: 未检测到本机 Bun —— 免费车道推理自动使用 Node 传输（可用）。如需 Bun 指纹，请安装 Bun 或设置 OUR_FREE_MODEL_BUN。(Bun not found: free-lane inference runs on the Node transport)')
   }
 
   // A hot reload re-enters apply with fresh stores; the generation counter lives
@@ -2757,12 +2761,14 @@ function buildSummary(deps) {
     freeLane: {
       proxyActive: freeLaneProxyActive(),
       proxyConfigured: String(deps.settings.get().freeLane?.proxyUrl ?? '').trim() !== '',
-      transport: process.env.OUR_FREE_MODEL_FREE_TRANSPORT ?? 'auto',
+      transport: freeLaneTransportReport().requested,
+      transportEffective: freeLaneTransportReport().effective,
     },
     // Environment readiness for the free lane: the official POST inference
     // needs a local Bun, and a user who never learns that reads only a failed
     // turn. Probed once at boot (see the readiness effect below).
     bun: deps.bunAvailable !== false,
+    bunRequired: false,
     probedAt: snapshot.at ?? 0,
     announcementVersion: ANNOUNCEMENT_VERSION,
     disclaimerVersion: DISCLAIMER_VERSION,

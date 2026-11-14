@@ -46,6 +46,7 @@ jobs:
           echo "ed24dfcc004725dee4c41e6b9d139fa10e97455af270187794f838327caec28f  downloads/snapshot-arm64.tar.xz" | sha256sum -c -
           # 回归门禁：宿主目录策略 + 插件真实 adapter，验证免费模型会出现在模型目录里
           node scripts/test-our-free-model-picker.mjs
+          node scripts/test-our-free-model-transport.mjs
           mkdir -p android-shell/app/src/main/assets
           python3 scripts/inject-our-free-model.py \
             downloads/snapshot-arm64.tar.xz \

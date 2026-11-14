@@ -321,7 +321,12 @@ export class FreeModelAdapter {
         return
       }
       const reason = result.verdict === null || result.verdict === undefined ? 'failed' : describeVerdict(result.verdict)
-      tried.push(`${candidate.id} (${reason})`)
+      // `describeVerdict` names the class, not the cause: a missing Bun used to
+      // read as "unavailable/transient · cooldown 30s · via code:transport", which
+      // tells the user nothing they can act on. Carry the candidate's own
+      // sentence when it has one.
+      const detail = failureDetail(held)
+      tried.push(`${candidate.id} (${reason}${detail === '' ? '' : ` · ${detail}`})`)
       this.deps.warn?.(`our-free-model: chain "${entry.name}" advanced past ${candidate.id} — ${reason}`)
     }
     rejectedTurn(candidates.length)
@@ -1046,4 +1051,23 @@ function describe(entry, settings) {
     }
   }
   return parts.join(' · ')
+}
+
+/**
+ * The actionable sentence a failed candidate produced, for the chain's summary
+ * line. Only a `finish` chunk carries one; anything longer than a log line is
+ * cut so one verbose upstream error cannot bury the rest of the chain.
+ *
+ * @param {Array<object>} chunks - chunks the candidate produced before it gave up
+ * @returns {string} the message, or '' when the candidate ended silently
+ */
+function failureDetail(chunks) {
+  for (let index = chunks.length - 1; index >= 0; index -= 1) {
+    const chunk = chunks[index]
+    if (chunk?.reason?.kind !== 'error') continue
+    const message = typeof chunk.reason.failure?.message === 'string' ? chunk.reason.failure.message.trim() : ''
+    if (message === '') continue
+    return message.length > 180 ? `${message.slice(0, 177)}…` : message
+  }
+  return ''
 }
