@@ -54,3 +54,41 @@
 
 - 同类不入库文件（第 2 个）：`src/subscriptions.js`（第 34 行 `GOCSPX-…` 常量），
   sha256=`ec1e01728f03bfd446f77dedf5615f50405b1c0679bf646c3a75cdf8bd0a86e2`，同样由第 2 步取回校验。
+
+## 缺陷修复：模型选择器里没有免费模型（2026-11-14）
+
+### 现象
+插件已挂载、设置面板可见，但模型选择器里没有任何 `our-free-model` 的模型。
+
+### 定位（全部为可复现证据，不靠推断）
+1. **插件侧健康**：离线实例化插件运行时，`state().catalog` = 6 行（`FALLBACK_CATALOG`），
+   `membership['our-free-model']` = 6，`adapter.listModels('our-free-model')` 返回 6 条。
+   说明模型数据本来就有，不是抓取失败。
+2. **宿主侧丢弃**：Android 的模型目录策略 `androidModelProviderConfigured`
+   （`app/src/main/assets/patched/model-catalog-host-015.js`，在 `buildModelCatalog` 里对每个 provider 调用）：
+   ```js
+   const entry = declarations.find(item => item.provider === provider)
+   if (!entry) return true
+   const namespace = namespaces.find(item => item.ns === entry.settingsNs)
+   let profile = namespace?.value
+   for (const key of entry.settingsPath) profile = profile?.[key]
+   if (!profile || typeof profile !== 'object') return false
+   ```
+   插件在 `index.js` 里声明了目录项 `settingsNs: 'our-free-model'`（`settingsPath: []`），
+   但它把设置存在自己的 JSON store，**从不向宿主 `ctx.settings` 注册命名空间**；
+   `SettingsService.describe()` 只返回注册过的命名空间 ⇒ `namespace` 为 `undefined` ⇒
+   该 provider 被判 `unconfigured` ⇒ 整组连模型一起被过滤，且**不记 failures**（静默消失）。
+3. **复算**：把上述函数与 `buildModelCatalog` 原文取出执行，配合插件真实 adapter：
+   修复前 `groups=0 / failures=0`；不声明目录项时 `groups=1`（6 个模型）。
+
+### 修复
+`android-shell/plugins/dsh-our-free-model/index.js`：目录项改为**条件声明** ——
+只有当宿主 `ctx.settings.describe()` 里确实存在该命名空间且其值是对象时才调用
+`registerConfigurableProviders`；否则跳过（日志 debug 一行）。路由本身始终通过
+`ctx.llm.registerAdapter` 注册，因此在任何宿主上都留在模型目录里。
+
+### 回归测试
+`scripts/test-our-free-model-picker.mjs`（9 条断言，不联网）：
+- 命名空间未注册 → 不声明；已注册 → 仍声明；无 settings 服务 → 降级不声明；
+- 宿主 `buildModelCatalog` + 插件真实 adapter：复现原缺陷 `groups=0`，修复后 `groups=1`、模型 6 条、无 failures；
+- `prepareCall` 返回可流式句柄，`resolveModel` 给出 `contextWindow=1048576 / defaultMaxTokens=32768`。

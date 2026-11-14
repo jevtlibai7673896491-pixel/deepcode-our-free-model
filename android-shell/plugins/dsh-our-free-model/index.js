@@ -492,9 +492,38 @@ export function apply(ctx, config) {
   // ── registration ────────────────────────────────────────────────────────────
   const routes = () => Object.keys(state().membership)
   const registration = ctx.llm.registerAdapter([ROUTE_MAIN, ROUTE_REGION], adapter)
-  ctx.llm.registerConfigurableProviders?.([
-    { provider: ROUTE_MAIN, displayName: ROUTE_LABELS[ROUTE_MAIN], settingsNs: ctx.fiber?.entry?.options?.id ?? name, settingsPath: [] },
-  ])
+  // ── host adaptation: the configurable-provider directory is only honest where
+  // the settings namespace it names really exists ─────────────────────────────
+  //
+  // This plugin keeps its settings in its own JSON store and never registers a
+  // host settings namespace. A host whose model catalog is built from the
+  // configurable-provider directory therefore resolves the declared namespace to
+  // `undefined` and drops the whole provider — mounted plugin, visible settings
+  // panel, empty model picker. The Android shell does exactly that
+  // (`androidModelProviderConfigured` in its patched session controller:
+  // `namespaces.find(...)` miss → `return false` → provider reported as
+  // unconfigured and filtered out with no failure recorded). Declaring the entry
+  // only when the namespace is registered keeps the directory surface where it
+  // is meaningful and leaves the route listed through the adapter everywhere
+  // else, which is what puts the free models in the picker.
+  const directoryNs = ctx.fiber?.entry?.options?.id ?? name
+  const directoryNamespaceLive = (() => {
+    try {
+      const namespaces = ctx.settings?.describe?.({ redactSecrets: true })
+      if (!Array.isArray(namespaces)) return false
+      const entry = namespaces.find(item => item?.ns === directoryNs)
+      return entry !== undefined && entry.value !== null && typeof entry.value === 'object'
+    } catch {
+      return false
+    }
+  })()
+  if (directoryNamespaceLive) {
+    ctx.llm.registerConfigurableProviders?.([
+      { provider: ROUTE_MAIN, displayName: ROUTE_LABELS[ROUTE_MAIN], settingsNs: directoryNs, settingsPath: [] },
+    ])
+  } else {
+    logger.debug?.(`our-free-model: provider directory entry skipped — settings namespace "${directoryNs}" is not registered on this host; the route stays listed through its adapter`)
+  }
 
   // Advertise a probe endpoint for the in-app "detect models" button. It offers
   // what the picker itself advertises — a model the gateway refuses to route at
